@@ -100,6 +100,29 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
         self._captcha_url = None
         self._captcha_token = None
 
+    def _register_captcha_view(self):
+        """Register the CAPTCHA HTTP view."""
+        class XiaomiCloudCaptchaView(HomeAssistantView):
+            url = "/api/xiaomi_cloud_map_extractor/captcha"
+            name = "xiaomi_cloud_map_extractor:captcha"
+            requires_auth = False
+
+            def __init__(self, hass):
+                self.hass = hass
+
+            async def get(self, request):
+                token = request.query.get("token")
+                store = self.hass.data.get(DOMAIN, {}).get("captcha_store", {})
+                entry = store.get(token)
+                if not entry:
+                    from aiohttp import web
+                    return web.Response(status=404, text="Not Found")
+                from aiohttp import web
+                return web.Response(body=entry["bytes"], content_type=entry["content_type"])
+
+        self.hass.http.register_view(XiaomiCloudCaptchaView(self.hass))
+        self.hass.data[DOMAIN]["captcha_view_registered"] = True
+
     @staticmethod
     @callback
     def async_get_options_flow(
@@ -161,51 +184,43 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
                 self._captcha_sign = e.sign
                 # Build absolute captcha URL for display
                 self._captcha_url = e.captcha_url
-                # Fetch the exact CAPTCHA image bytes using the same session and expose via a local HTTP view
+                # Fetch the CAPTCHA image and store it for serving via HTTP view
                 try:
                     r = await self.connector._session_data.get(self._captcha_url)
                     if r.status == 200:
                         img_bytes = await r.read()
                         content_type = r.headers.get("Content-Type", "image/jpeg")
+                        # Store image data for HTTP view
+                        self._captcha_image_bytes = img_bytes
+                        self._captcha_image_content_type = content_type
+                        # Generate a unique token for this CAPTCHA session
+                        self._captcha_token = uuid.uuid4().hex
+                        # Store in Home Assistant data for the HTTP view
                         store = self.hass.data.setdefault(DOMAIN, {}).setdefault("captcha_store", {})
                         # Cleanup old entries (older than 5 minutes)
                         now = time.time()
                         for k in list(store.keys()):
                             if now - store[k].get("ts", 0) > 300:
                                 store.pop(k, None)
-                        token = uuid.uuid4().hex
-                        store[token] = {"bytes": img_bytes, "content_type": content_type, "ts": now}
-                        self._captcha_token = token
-                        # Ensure view is registered once
+                        store[self._captcha_token] = {
+                            "bytes": img_bytes, 
+                            "content_type": content_type, 
+                            "ts": now
+                        }
+                        # Register the HTTP view if not already registered
                         if not self.hass.data.setdefault(DOMAIN, {}).get("captcha_view_registered"):
-                            class XiaomiCloudCaptchaView(HomeAssistantView):
-                                url = "/api/xiaomi_cloud_map_extractor/captcha"
-                                name = "xiaomi_cloud_map_extractor:captcha"
-                                requires_auth = False
-
-                                def __init__(self, hass):
-                                    self.hass = hass
-
-                                async def get(self, request):
-                                    token = request.query.get("token")
-                                    store = self.hass.data.get(DOMAIN, {}).get("captcha_store", {})
-                                    entry = store.get(token)
-                                    if not entry:
-                                        from aiohttp import web
-                                        return web.Response(status=404, text="Not Found")
-                                    from aiohttp import web
-                                    return web.Response(body=entry["bytes"], content_type=entry["content_type"])
-
-                            self.hass.http.register_view(XiaomiCloudCaptchaView(self.hass))
-                            self.hass.data[DOMAIN]["captcha_view_registered"] = True
+                            self._register_captcha_view()
+                    else:
+                        self._captcha_token = None
                 except Exception:
-                    pass
+                    self._captcha_token = None
                 return self.async_show_form(
                     step_id="captcha",
                     data_schema=CAPTCHA_SCHEMA,
                     errors={},
                     description_placeholders={
-                        "captcha_url": "/api/xiaomi_cloud_map_extractor/captcha?token=" + (self._captcha_token or ""),
+                        "captcha_url": self._captcha_url or "",
+                        "captcha_image": f"![CAPTCHA](/api/xiaomi_cloud_map_extractor/captcha?token={self._captcha_token})" if self._captcha_token else "",
                     },
                 )
             except TwoFactorAuthRequiredException as e:
@@ -224,8 +239,7 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
                     form_result = self.async_show_form(
                         step_id="two_factor",
                         data_schema=vol.Schema({vol.Required("verification_code"): str}),
-                        errors={},
-                        description_placeholders={"two_factor_url": self.two_factor_url}
+                        errors={}
                     )
                     _LOGGER.error("2FA_REDIRECT: 2FA form created successfully")
                     return form_result
@@ -233,7 +247,6 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
                     _LOGGER.error("2FA_REDIRECT: Error creating 2FA form: %s", form_error, exc_info=True)
                     # Fall back to error message
                     errors["base"] = "two_factor_auth_required"
-                    two_factor_url = e.url
             except InvalidCredentialsException as e:
                 _LOGGER.error("InvalidCredentialsException during login: %s", str(e))
                 errors["base"] = "TESTING_INVALID_CREDENTIALS"
@@ -252,13 +265,8 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
 
             if errors:
                 _LOGGER.error("FINAL_ERROR_CHECK: Found errors, showing cloud form with errors: %s", errors)
-                _LOGGER.error("FINAL_ERROR_CHECK: two_factor_url value: %s", two_factor_url)
-                placeholders = {}
-                if two_factor_url:
-                    placeholders["two_factor_url"] = two_factor_url
                 return self.async_show_form(
-                    step_id="cloud", data_schema=CLOUD_SCHEMA, errors=errors,
-                    description_placeholders=placeholders
+                    step_id="cloud", data_schema=CLOUD_SCHEMA, errors=errors
                 )
 
             try:
@@ -325,12 +333,11 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
             else:
                 errors["base"] = "two_factor_invalid_code"
         
-        _LOGGER.error("2FA_STEP: Showing 2FA form with URL: %s", self.two_factor_url)
+        _LOGGER.error("2FA_STEP: Showing 2FA form")
         return self.async_show_form(
             step_id="two_factor",
             data_schema=TWO_FACTOR_SCHEMA,
-            errors=errors,
-            description_placeholders={"two_factor_url": self.two_factor_url}
+            errors=errors
         )
 
     async def async_step_captcha(
@@ -366,17 +373,8 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
             else:
                 errors["base"] = "captcha_invalid"
 
-        # Prefetch captcha image to establish required cookies in our session,
-        # and embed the image as a data URL so it matches our session challenge.
-        captcha_image_data_url = ""
-        try:
-            if getattr(self, "_captcha_url", None) and getattr(self, "connector", None) and getattr(self.connector, "_session_data", None):
-                r = await self.connector._session_data.get(self._captcha_url)
-                if r.status == 200:
-                    img_bytes = await r.read()
-                    captcha_image_data_url = "data:image/jpeg;base64," + base64.b64encode(img_bytes).decode("ascii")
-        except Exception:
-            pass
+        # Use the already fetched captcha image URL if available
+        captcha_token = getattr(self, "_captcha_token", None)
 
         return self.async_show_form(
             step_id="captcha",
@@ -384,7 +382,7 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={
                 "captcha_url": getattr(self, "_captcha_url", ""),
-                "captcha_image": captcha_image_data_url,
+                "captcha_image": f"![CAPTCHA](/api/xiaomi_cloud_map_extractor/captcha?token={captcha_token})" if captcha_token else "",
             },
         )
 

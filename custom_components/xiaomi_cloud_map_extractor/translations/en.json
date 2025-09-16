@@ -30,13 +30,13 @@
         "data": {
           "verification_code": "Verification Code"
         },
-        "description": "Xiaomi has sent a verification code to your email. Please enter the 6-digit code below. You can also visit this URL if needed: {two_factor_url}"
+        "description": "Xiaomi has sent a verification code to your email. Please enter the 6-digit code below."
       },
       "captcha": {
         "data": {
           "captcha_code": "Captcha Code"
         },
-        "description": "Xiaomi requires a captcha to continue. Open the image at: {captcha_url}, then enter the characters you see."
+        "description": "Xiaomi requires a captcha to continue. Enter the characters you see in the image below:\n\n{captcha_image}\n\nIf the image doesn't load, you can also try opening this URL directly: {captcha_url}"
       },
       "confirm_data": {
         "data": {
