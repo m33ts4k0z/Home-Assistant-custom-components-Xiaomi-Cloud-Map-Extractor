@@ -123,6 +123,39 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
         self.hass.http.register_view(XiaomiCloudCaptchaView(self.hass))
         self.hass.data[DOMAIN]["captcha_view_registered"] = True
 
+    async def _fetch_new_captcha(self):
+        """Fetch a new CAPTCHA image when the previous one was invalid."""
+        if not hasattr(self, '_captcha_url') or not self._captcha_url:
+            return
+            
+        try:
+            _LOGGER.debug("Fetching new CAPTCHA image from: %s", self._captcha_url)
+            r = await self.connector._session_data.get(self._captcha_url)
+            if r.status == 200:
+                img_bytes = await r.read()
+                content_type = r.headers.get("Content-Type", "image/jpeg")
+                # Generate a new unique token for this CAPTCHA session
+                self._captcha_token = uuid.uuid4().hex
+                # Store in Home Assistant data for the HTTP view
+                store = self.hass.data.setdefault(DOMAIN, {}).setdefault("captcha_store", {})
+                # Cleanup old entries (older than 5 minutes)
+                now = time.time()
+                for k in list(store.keys()):
+                    if now - store[k].get("ts", 0) > 300:
+                        store.pop(k, None)
+                store[self._captcha_token] = {
+                    "bytes": img_bytes, 
+                    "content_type": content_type, 
+                    "ts": now
+                }
+                _LOGGER.debug("New CAPTCHA image fetched and stored with token: %s", self._captcha_token)
+            else:
+                _LOGGER.warning("Failed to fetch new CAPTCHA image, status: %s", r.status)
+                self._captcha_token = None
+        except Exception as e:
+            _LOGGER.error("Error fetching new CAPTCHA image: %s", e)
+            self._captcha_token = None
+
     @staticmethod
     @callback
     def async_get_options_flow(
@@ -362,14 +395,17 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
                     return self.async_show_form(
                         step_id="two_factor",
                         data_schema=TWO_FACTOR_SCHEMA,
-                        errors={},
-                        description_placeholders={"two_factor_url": self.two_factor_url}
+                        errors={}
                     )
                 except InvalidCredentialsException:
                     errors["base"] = "captcha_invalid"
+                    # Fetch a new CAPTCHA image for retry
+                    await self._fetch_new_captcha()
                 except Exception as e:
                     _LOGGER.error("CAPTCHA_STEP: Unexpected error: %s", e, exc_info=True)
                     errors["base"] = "captcha_error"
+                    # Try to fetch a new CAPTCHA image even on unexpected errors
+                    await self._fetch_new_captcha()
             else:
                 errors["base"] = "captcha_invalid"
 
