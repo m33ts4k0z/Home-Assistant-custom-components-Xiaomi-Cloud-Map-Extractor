@@ -199,7 +199,7 @@ class XiaomiCloudMapExtractorFlowHandler(ConfigFlow, domain=DOMAIN):
             connector = XiaomiCloudConnector(session_creator, username, password, server)
             two_factor_url = None
             try:
-                _LOGGER.error("DEBUG: Config flow starting login attempt - THIS IS A TEST MESSAGE")
+                _LOGGER.error("DEBUG: Config flow starting login attempt")
                 _LOGGER.debug("About to call connector.login()")
                 login_result = await connector.login()
                 _LOGGER.debug("Login completed with result: %s", login_result)
